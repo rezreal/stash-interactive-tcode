@@ -33,7 +33,7 @@ reload the browser tab.
   **SSR1** (L0 only) – or **Custom**. The preset decides which axes are active; your range, invert and
   speed limits per axis are kept when switching. Ticking an axis on/off by hand switches to Custom.
   Auxiliary axes (V0/V1 vibe, A0–A2 valve/suction/lube) are active in every preset but only sent when a channel maps to them.
-- **Scene page → "TCode" tab:** every channel found in the scene's script, with a preview line,
+- **Scene page → "Interactive" tab:** every channel found in the scene's script, with a preview line (an orange marker follows the video's position),
   live output meter, and per channel:
   - target axis (or off)
   - invert
@@ -58,7 +58,7 @@ never replaces or blocks them:
 
 ## 3D preview
 
-In the TCode tab, **Show 3D preview** renders the selected device (OSR2, SR6 or SSR1; Custom picks SR6 if
+In the Interactive tab, **Show 3D preview** renders the selected device (OSR2, SR6 or SSR1; Custom picks SR6 if
 surge/sway are enabled). It receives exactly the TCode lines the device gets – after channel mapping, axis caps,
 invert and speed limits – so it shows what the hardware will really do. Drag to rotate, scroll to zoom.
 

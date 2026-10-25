@@ -1178,8 +1178,43 @@
 
   /* ---------- scene tab ---------- */
 
+  /*
+   * Playhead: one animation-frame loop moves the marker on every mounted sparkline to the video's
+   * current time. It writes styles directly instead of re-rendering React, and follows the video
+   * whether or not anything is connected, so seeking while paused moves it too.
+   */
+  const playheads = new Set(); // { el, end, t }
+  let playheadRaf = 0;
+
+  function playheadFrame() {
+    playheadRaf = 0;
+    if (!playheads.size) return;
+    const v = engine._video;
+    const t = v && Number.isFinite(v.currentTime) ? v.currentTime * 1000 : null;
+    for (const p of playheads) {
+      if (t === p.t) continue;
+      p.t = t;
+      if (t == null) { p.el.style.display = "none"; continue; }
+      p.el.style.display = "";
+      p.el.style.left = clamp(t / p.end, 0, 1) * 100 + "%";
+    }
+    playheadRaf = requestAnimationFrame(playheadFrame);
+  }
+
+  function addPlayhead(p) {
+    playheads.add(p);
+    if (!playheadRaf) playheadRaf = requestAnimationFrame(playheadFrame);
+    return () => playheads.delete(p);
+  }
+
   function Sparkline({ actions, durationMs, inverted }) {
     const ref = React.useRef(null);
+    const headRef = React.useRef(null);
+    const end = actions.length ? Math.max(durationMs || 0, actions[actions.length - 1].at) || 1 : 1;
+    React.useEffect(() => {
+      if (!headRef.current) return;
+      return addPlayhead({ el: headRef.current, end, t: undefined });
+    }, [end]);
     React.useEffect(() => {
       const c = ref.current;
       if (!c || !actions.length) return;
@@ -1189,7 +1224,6 @@
       const ctx = c.getContext("2d");
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, w, ht);
-      const end = Math.max(durationMs || 0, actions[actions.length - 1].at) || 1;
       ctx.strokeStyle = getComputedStyle(c).color;
       ctx.lineWidth = 1;
       ctx.globalAlpha = 0.85;
@@ -1203,8 +1237,10 @@
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
-    }, [actions, durationMs, inverted]);
-    return h("canvas", { ref, className: "tcp-spark" });
+    }, [actions, end, inverted]);
+    return h("div", { className: "tcp-spark-wrap" },
+      h("canvas", { ref, className: "tcp-spark" }),
+      h("div", { ref: headRef, className: "tcp-playhead", style: { display: "none" } }));
   }
 
   function Meter({ value }) {
@@ -1416,7 +1452,7 @@
 
   api.patch.after("ScenePage.Tabs", function () {
     return h(React.Fragment, null, lastArg(arguments),
-      h(Nav.Item, { key: "tcp-tab" }, h(Nav.Link, { eventKey: TAB_KEY }, "TCode")));
+      h(Nav.Item, { key: "tcp-tab" }, h(Nav.Link, { eventKey: TAB_KEY }, "Interactive")));
   });
 
   api.patch.after("ScenePage.TabContent", function (props) {
