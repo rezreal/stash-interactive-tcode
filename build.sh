@@ -8,7 +8,7 @@ set -euo pipefail
 
 ID="TCodePlayer"
 NAME="TCode Player"
-DESC="Plays single- and multi-axis funscripts on TCode devices (OSR2, SR6, SSR1) over Web Serial, with per-scene channel mapping and a 3D preview."
+DESC="Plays single- and multi-axis funscripts on TCode devices (OSR2, SR6, SSR1) over Web Serial and the Hismith PiuPiu lube launcher over Web Bluetooth, with per-scene channel mapping and a 3D preview."
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST="$ROOT/dist"

@@ -25,7 +25,7 @@ jobs:
       - name: Syntax check
         run: node --check plugin/TCodePlayer.js
       - name: Test
-        run: node --test test/*.test.js
+        run: node --test --test-timeout=30000 test/*.test.js
       - name: Build package source
         run: ./build.sh
       - uses: actions/upload-pages-artifact@v3

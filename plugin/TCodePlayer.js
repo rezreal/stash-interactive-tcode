@@ -520,6 +520,7 @@
   const { Button, Form, Modal, Dropdown, Nav, Tab, Badge, Table } = api.libraries.Bootstrap;
   const { FontAwesomeIcon } = api.libraries.ReactFontAwesome;
   const Icons = api.libraries.FontAwesomeSolid;
+  const LubeIcon = Icons.faDroplet || Icons.faTint;
   const gql = api.libraries.Apollo.gql;
 
   function client() { return api.utils.StashService.getClient(); }
@@ -579,6 +580,22 @@
 
   const PORT_KEY = "tcp-port"; // getInfo() of the port this plugin last opened
 
+  /*
+   * Hismith PiuPiu lube launcher over Web Bluetooth. One momentary command, no parameters and no
+   * feedback (buttplugio/docs.buttplug.io#34); a longer shot is the command repeated, so it is resent
+   * every 100 ms while the A2 (lube) axis is above half.
+   */
+  const LUBE = {
+    names: ["Hismith Piupiu", "Piupiu"],
+    service: 0xffe5,
+    tx: 0xffe9,
+    squirt: [0xcc, 0x0b, 0x01, 0x0c],
+    axis: "A2",
+    threshold: 0.5,
+    repeatMs: 100,
+    key: "tcp-lube", // id of the launcher this plugin last paired with
+  };
+
   function portId(port) {
     try { return JSON.stringify(port.getInfo()); } catch (e) { return "{}"; }
   }
@@ -592,6 +609,10 @@
       deviceInfo: null,
       deviceLog: [],
       outputEnabled: true,
+      lubeSupported: typeof navigator !== "undefined" && "bluetooth" in navigator,
+      lubeStatus: "disconnected", // disconnected | connecting | connected | error
+      lubeError: null,
+      lubeActive: false,          // launcher firing (also shown on the 3D preview without one)
       profile: defaultProfile(),
       profileLoaded: false,
       scene: null,       // { id, title, durationMs, path, funscriptUrl, interactive }
@@ -630,6 +651,13 @@
     _liveNotify: 0,
     _sceneRefs: 0,
     _genCache: null,
+    _lubeDevice: null,
+    _lubeChar: null,
+    _lubeTimer: null,
+    _lubeWriting: false,
+    _lubeAuto: false,   // from playback / Test
+    _lubeManual: false, // hold-to-squirt button
+    _onLubeGone: null,
 
     subscribe(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); },
     set(patch) { Object.assign(this.state, patch); this._listeners.forEach((fn) => fn()); },
@@ -645,6 +673,7 @@
       }
       this.recompute();
       if (this.state.supported && this.state.profile.autoConnect) this.autoConnect();
+      if (this.state.lubeSupported && this.state.profile.autoConnect) this.autoConnectLube();
       if (this.state.supported) {
         navigator.serial.addEventListener("disconnect", (ev) => {
           if (this._port && ev.target === this._port) this._cleanup("Device unplugged");
@@ -773,10 +802,11 @@
       try { if (port) await port.close(); } catch (e) { /* ignore */ }
       this._reader = null; this._writer = null; this._readDone = null; this._writing = false;
       this.set({ status: reason ? "error" : "disconnected", error: reason, live: {} });
+      this.updateLoop(); // a connected lube launcher or preview keeps following the video
     },
 
     /** true when something consumes TCode: a serial device and/or a 3D preview. */
-    hasOutput() { return !!this._port || this._emus.size > 0; },
+    hasOutput() { return !!this._port || this._emus.size > 0 || !!this._lubeChar; },
 
     addEmulator(emu) {
       this._emus.add(emu);
@@ -830,6 +860,119 @@
       this.set({ outputEnabled: !!on });
       if (!on) this.home(600);
       this.updateLoop();
+    },
+
+    /* ---------- lube launcher (Web Bluetooth) ---------- */
+    async connectLube() {
+      if (!this.state.lubeSupported) return;
+      let device;
+      try {
+        device = await navigator.bluetooth.requestDevice({
+          filters: LUBE.names.map((namePrefix) => ({ namePrefix })),
+          optionalServices: [LUBE.service],
+        });
+      } catch (e) {
+        if (e && e.name === "NotFoundError") return; // picker cancelled
+        this.set({ lubeStatus: "error", lubeError: String((e && e.message) || e) });
+        return;
+      }
+      await this._openLube(device, false);
+    },
+
+    /** Like serial auto-connect: only the launcher this plugin paired with, and only if nobody else holds it. */
+    async autoConnectLube() {
+      try {
+        const known = lsGet(LUBE.key);
+        if (!known || !navigator.bluetooth.getDevices) return;
+        const devices = await navigator.bluetooth.getDevices();
+        const device = devices.find((d) => d.id === known);
+        if (device && !(device.gatt && device.gatt.connected)) await this._openLube(device, true);
+      } catch (e) {
+        console.info("[TCodePlayer] lube launcher auto-connect skipped", e);
+      }
+    },
+
+    async _openLube(device, quiet) {
+      if (device.gatt && device.gatt.connected) {
+        // already connected in this page - another plugin is using it
+        if (!quiet) this.set({ lubeStatus: "error", lubeError: "The lube launcher is already in use by another plugin." });
+        return false;
+      }
+      this.set({ lubeStatus: "connecting", lubeError: null });
+      try {
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(LUBE.service);
+        const ch = await service.getCharacteristic(LUBE.tx);
+        this._lubeDevice = device;
+        this._lubeChar = ch;
+        device.addEventListener("gattserverdisconnected", this._onLubeGone = () => this._closeLube("Lube launcher disconnected"));
+      } catch (e) {
+        try { if (device.gatt && device.gatt.connected) device.gatt.disconnect(); } catch (x) { /* ignore */ }
+        if (quiet) {
+          console.info("[TCodePlayer] lube launcher not reachable, not auto-connecting", e);
+          this.set({ lubeStatus: "disconnected" });
+        } else {
+          this.set({ lubeStatus: "error", lubeError: "Could not connect the lube launcher: " + ((e && e.message) || e) });
+        }
+        return false;
+      }
+      lsSet(LUBE.key, device.id);
+      this.set({ lubeStatus: "connected" });
+      this._applyLube();
+      this.updateLoop();
+      return true;
+    },
+
+    disconnectLube() {
+      const d = this._lubeDevice;
+      this._closeLube(null);
+      try { if (d && d.gatt && d.gatt.connected) d.gatt.disconnect(); } catch (e) { /* ignore */ }
+    },
+
+    _closeLube(reason) {
+      if (this._lubeDevice && this._onLubeGone) this._lubeDevice.removeEventListener("gattserverdisconnected", this._onLubeGone);
+      this._lubeDevice = null;
+      this._lubeChar = null;
+      this._lubeWriting = false;
+      this._applyLube();
+      this.set({ lubeStatus: reason ? "error" : "disconnected", lubeError: reason });
+      this.updateLoop();
+    },
+
+    /** Hold-to-squirt from the menu. */
+    squirt(on) { this._setLube("manual", on); },
+
+    _setLube(source, on) {
+      on = !!on;
+      if (source === "manual") { if (this._lubeManual === on) return; this._lubeManual = on; }
+      else { if (this._lubeAuto === on) return; this._lubeAuto = on; }
+      this._applyLube();
+    },
+
+    _applyLube() {
+      const active = this._lubeAuto || this._lubeManual;
+      if (active !== this.state.lubeActive) this.set({ lubeActive: active });
+      const fire = active && !!this._lubeChar;
+      if (fire && !this._lubeTimer) {
+        this._sendSquirt();
+        this._lubeTimer = setInterval(() => this._sendSquirt(), LUBE.repeatMs);
+      } else if (!fire && this._lubeTimer) {
+        clearInterval(this._lubeTimer); // the launcher stops once the command stops coming
+        this._lubeTimer = null;
+      }
+    },
+
+    _sendSquirt() {
+      const ch = this._lubeChar;
+      if (!ch || this._lubeWriting) return; // one write in flight at a time
+      this._lubeWriting = true;
+      const data = new Uint8Array(LUBE.squirt);
+      const write = ch.properties && ch.properties.writeWithoutResponse && ch.writeValueWithoutResponse
+        ? ch.writeValueWithoutResponse(data)
+        : (ch.writeValueWithResponse ? ch.writeValueWithResponse(data) : ch.writeValue(data));
+      Promise.resolve(write)
+        .catch((e) => console.warn("[TCodePlayer] lube write failed", e))
+        .finally(() => { this._lubeWriting = false; });
     },
 
     /* ---------- scene ---------- */
@@ -1064,6 +1207,7 @@
     _stopTimer() {
       if (this._timer) clearInterval(this._timer);
       this._timer = null;
+      this._setLube("auto", false); // pause, seek, output off, scene left: stop squirting
     },
 
     _restartTimerIfRunning() {
@@ -1074,13 +1218,13 @@
       const v = this._video;
       if (!v || !this._shouldRun()) { this.updateLoop(); return; }
       const now = performance.now();
-      if (now < this._rampUntil) return; // let the device finish the resync move
-
       const p = this.state.profile;
       const dt = 1000 / p.rateHz;
       const offset = num(p.offsetMs, 0) + num(this.state.edit && this.state.edit.offsetMs, 0);
       const t = v.currentTime * 1000 + offset + dt; // aim one tick ahead
       const targets = computeTargets(this.state.channels, this.state.mapping, p, t);
+      this._setLube("auto", targets[LUBE.axis] > LUBE.threshold);
+      if (now < this._rampUntil) return; // let the device finish the resync move
 
       let interval = dt;
       if (this._rampPending) {
@@ -1122,8 +1266,10 @@
         for (let i = 0; i < 20 && this._writing; i++) await new Promise((r) => setTimeout(r, 10));
         this.sendTargets({ [axis]: x }, ms);
         this._last[axis] = x;
+        if (axis === LUBE.axis) this._setLube("auto", x > LUBE.threshold);
         await new Promise((r) => setTimeout(r, ms + 50));
       }
+      if (axis === LUBE.axis) this._setLube("auto", false);
       this._rampPending = true;
       this.set({ testing: false });
       this.updateLoop();
@@ -1201,6 +1347,58 @@
     }, s.status === "connecting" ? "Connecting…" : "Connect device");
   }
 
+  /* ---------- lube launcher ---------- */
+
+  const lubeStatusText = {
+    disconnected: "Lube launcher not connected",
+    connecting: "Connecting lube launcher…",
+    connected: "Lube launcher connected",
+    error: "Lube launcher error",
+  };
+
+  /** Press-and-hold: squirts for as long as it is held. */
+  function SquirtButton() {
+    const s = useEngine();
+    const start = (e) => { e.preventDefault(); engine.squirt(true); };
+    const stop = () => engine.squirt(false);
+    React.useEffect(() => stop, []); // never leave it firing when the menu closes
+    return h(Button, {
+      size: "sm", variant: s.lubeActive ? "info" : "secondary", title: "Hold to squirt",
+      onMouseDown: start, onMouseUp: stop, onMouseLeave: stop,
+      onTouchStart: start, onTouchEnd: stop, onTouchCancel: stop,
+      onKeyDown: (e) => { if (e.key === " " || e.key === "Enter") start(e); }, onKeyUp: stop, onBlur: stop,
+    }, icon(LubeIcon), " Squirt");
+  }
+
+  function LubeSection() {
+    const s = useEngine();
+    if (!s.lubeSupported) return null;
+    const connected = s.lubeStatus === "connected";
+    return h(React.Fragment, null,
+      h("div", { className: "tcp-row tcp-mt" },
+        h(StatusDot, { status: connected && s.lubeActive ? "live" : s.lubeStatus }),
+        h("span", { className: "tcp-grow tcp-small" }, lubeStatusText[s.lubeStatus]),
+        connected && h(SquirtButton),
+        connected
+          ? h(Button, { size: "sm", variant: "secondary", onClick: () => engine.disconnectLube() }, "Disconnect")
+          : h(Button, {
+            size: "sm", variant: "secondary", disabled: s.lubeStatus === "connecting",
+            title: "Hismith PiuPiu lube launcher over Bluetooth", onClick: () => engine.connectLube(),
+          }, "Connect")),
+      s.lubeError && h("div", { className: "tcp-error" }, s.lubeError));
+  }
+
+  /** Droplet on the 3D preview that lights up while the launcher fires (with or without one connected). */
+  function LubeBadge() {
+    const s = useEngine();
+    const relevant = s.lubeStatus === "connected" || s.mapping.some((m) => m.axis === LUBE.axis);
+    if (!relevant) return null;
+    return h("div", {
+      className: "tcp-lube-badge" + (s.lubeActive ? " tcp-lube-on" : ""),
+      title: s.lubeActive ? "Lube launcher firing" : "Lube launcher idle",
+    }, icon(LubeIcon));
+  }
+
   /* ---------- navbar menu ---------- */
 
   const NavToggle = React.forwardRef(function NavToggle({ onClick, status, live, id }, ref) {
@@ -1236,6 +1434,7 @@
               type: "switch", id: uid + "-out", label: "Send motion to device",
               checked: s.outputEnabled, onChange: (e) => engine.setOutputEnabled(e.target.checked),
             }),
+            h(LubeSection),
             s.scene && h("div", { className: "tcp-muted tcp-small" },
               s.scriptState === "ready"
                 ? `${channelCount(s)} for this scene`
@@ -1541,6 +1740,7 @@
     }, [model]);
     return h("div", { className: "tcp-preview" },
       h("div", { ref, className: "tcp-preview-canvas" }),
+      h(LubeBadge),
       state.phase === "loading" && h("div", { className: "tcp-preview-msg" }, "Loading 3D model…"),
       state.phase === "error" && h("div", { className: "tcp-preview-msg tcp-error" }, state.error));
   }

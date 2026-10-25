@@ -5,7 +5,7 @@ Plays single- and multi-axis funscripts on TCode devices (OSR2, SR6) directly fr
 ## Requirements
 
 - **Stash v0.31 or newer** (scene custom fields)
-- **Chrome, Edge or Opera on desktop** (Web Serial)
+- **Chrome, Edge or Opera on desktop** (Web Serial; Web Bluetooth for the lube launcher)
 - Stash opened on a **secure origin**: `https://…` or `http://localhost:9999`.
   On a plain LAN address like `http://192.168.1.10:9999` the browser hides Web Serial.
   Options: enable HTTPS in Stash (place `stash.crt` and `stash.key` next to your `config.yml`), put it behind a reverse proxy with TLS,
@@ -54,7 +54,27 @@ never replaces or blocks them:
   therefore only reopens the port *this* plugin connected to before, skips ports that are already open, and
   quietly stays disconnected if another plugin, tab or app (e.g. Intiface) is using the device. Connect
   manually from the menu once to pick the device.
+- **Lube launcher:** same rule over Bluetooth – auto-connect only reconnects the launcher this plugin paired
+  with, and leaves it alone if another plugin in the page is already connected to it.
 - The 3D preview library is loaded on demand and leaves only `window.OSREmulator` behind.
+
+## Lube launcher (Hismith PiuPiu)
+
+The Hismith PiuPiu lube launcher connects directly over **Web Bluetooth** – separately from the TCode device, so
+it works with or without an OSR/SR6. In the navbar menu, **Lube launcher → Connect** and pick it in the
+browser's list.
+
+- It follows the **A2 (lube) axis**: while the mapped lube value is above 50 % it squirts, for as long as the
+  script keeps it there. A script's `lube` channel maps to A2 by default, so channel mapping, invert, range and
+  the Test button work as for any other channel. A TCode lube pump on A2 still gets its commands as before.
+- It stops on pause, seek, when *Send motion to device* is switched off, and when you leave the scene.
+- **Squirt** in the menu fires for as long as you hold it.
+- The 3D preview shows a droplet that lights up while it fires – also without a launcher connected, so you can
+  check a script's lube timing first.
+
+The launcher has a single command with no length or strength; a longer shot is the command repeated every
+100 ms ([protocol](https://github.com/buttplugio/docs.buttplug.io/issues/34)). Reconnecting after a page reload
+needs a browser that supports `navigator.bluetooth.getDevices()`; otherwise press Connect once per visit.
 
 ## 3D preview
 
@@ -159,7 +179,7 @@ No build step: `plugin/` is the plugin exactly as Stash loads it (plain JS on `w
 `createElement`). The pure core of `TCodePlayer.js` is exported via `module.exports` when loaded in Node.
 
 ```bash
-node --test test/*.test.js   # core + coexistence tests, no deps
+node --test test/*.test.js   # core, generator, coexistence and lube launcher tests, no deps
 ./build.sh                   # produces dist/index.yml + dist/TCodePlayer.zip
 ```
 

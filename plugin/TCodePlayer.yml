@@ -1,6 +1,6 @@
 name: TCode Player
-description: Plays single- and multi-axis funscripts (1.0 / 1.1 axes / 2.0 channels) on OSR2/SR6 devices over Web Serial, with an optional 3D preview. Global device profile in plugin config, per-scene channel mapping in the scene custom field "tcode_map".
-version: 0.4.0
+description: Plays single- and multi-axis funscripts (1.0 / 1.1 axes / 2.0 channels) on OSR2/SR6/SSR1 devices over Web Serial and the Hismith PiuPiu lube launcher over Web Bluetooth, with an optional 3D preview. Global device profile in plugin config, per-scene channel mapping in the scene custom field "tcode_map".
+version: 0.5.0
 url: https://github.com/rezreal/stash-interactive-tcode
 ui:
   javascript:
