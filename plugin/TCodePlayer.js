@@ -345,18 +345,56 @@
     return clamp((oct(u, seed) + 0.5 * oct(u * 2.03 + 17.3, seed + 101)) / 1.5 * 1.6, -1, 1);
   }
 
+  const FOLLOW_MIN_SWING = 5; // reversals smaller than this (% of range) are jitter, not a new stroke
+
+  /** Indexes of the stroke's turning points, first and last action included, ignoring small jitter. */
+  function turningPoints(acts) {
+    const idx = [0];
+    let ext = 0, dir = 0; // candidate extreme of the current stroke and its direction (0 = not moving yet)
+    for (let i = 1; i < acts.length; i++) {
+      const d = acts[i].pos - acts[ext].pos;
+      if (dir === 0) {
+        if (Math.abs(d) >= FOLLOW_MIN_SWING) { dir = Math.sign(d); ext = i; }
+      } else if (d * dir > 0) {
+        ext = i; // further the same way (strictly, so a hold keeps its first point)
+      } else if (-d * dir >= FOLLOW_MIN_SWING) {
+        idx.push(ext); // turned back far enough: the candidate was a turning point
+        dir = -dir;
+        ext = i;
+      }
+    }
+    if (ext !== idx[idx.length - 1]) idx.push(ext);
+    if (idx[idx.length - 1] !== acts.length - 1) idx.push(acts.length - 1);
+    return idx;
+  }
+
   /**
-   * Follow: leans one way while the stroke goes up and the other way while it goes down, centred
-   * at the turning points - the stroke shifted by a quarter cycle. Bigger strokes lean further, and
-   * it never moves faster than amp x the stroke's own speed.
+   * Follow: leans one way while the stroke goes up and the other way while it goes down - roughly the
+   * stroke a quarter cycle on. The lean depends on where the stroke is within its current stroke:
+   * none at the turning points, most at the middle, so it holds whenever the stroke holds, bigger
+   * strokes lean further, and it never moves faster than amp x the stroke's own speed. Works the
+   * same for sparse hand-made scripts and densely sampled ones.
    */
   function genFollow(acts, amp) {
-    const out = [];
-    for (let i = 0; i < acts.length; i++) {
-      const a = acts[i];
-      out.push({ at: a.at, pos: 50 });
-      const b = acts[i + 1];
-      if (b && b.at > a.at) out.push({ at: (a.at + b.at) / 2, pos: 50 + amp * (b.pos - a.pos) / 2 });
+    const tp = turningPoints(acts);
+    const out = [{ at: acts[0].at, pos: 50 }];
+    for (let k = 0; k + 1 < tp.length; k++) {
+      const i0 = tp[k], i1 = tp[k + 1];
+      const from = acts[i0].pos, span = acts[i1].pos - from, mid = from + span / 2;
+      const lean = (p) => {
+        if (!span) return 50;
+        const u = clamp((p - from) / span, 0, 1);
+        return 50 + amp * span * Math.min(u, 1 - u);
+      };
+      for (let j = i0; j < i1; j++) {
+        const a = acts[j], b = acts[j + 1];
+        if (j > i0) out.push({ at: a.at, pos: lean(a.pos) });
+        // the stroke passes the middle inside this segment: that is the peak of the lean
+        if ((a.pos - mid) * (b.pos - mid) < 0) {
+          out.push({ at: a.at + (b.at - a.at) * (mid - a.pos) / (b.pos - a.pos), pos: lean(mid) });
+        }
+      }
+      out.push({ at: acts[i1].at, pos: lean(acts[i1].pos) });
     }
     return out;
   }

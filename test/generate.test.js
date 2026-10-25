@@ -109,3 +109,34 @@ test("profile defaults and validation", () => {
   assert.equal(Core.normalizeProfile({ generate: "bogus" }).generate, "off");
   assert.equal(Core.normalizeProfile({ generate: "gentle", generateVibe: 1 }).generateVibe, true);
 });
+
+// the same up-and-down motion sampled every 20 ms, as motion-tracked or generated scripts are
+function denseScript(jitter) {
+  const acts = [];
+  for (let t = 0, i = 0; t <= 10000; t += 20, i++) {
+    const pos = 50 - 50 * Math.cos(Math.PI * t / 500) + (jitter ? (i % 2 ? jitter : -jitter) : 0);
+    acts.push({ at: t, pos: Math.min(100, Math.max(0, pos)) });
+  }
+  return [{ name: "stroke", actions: acts, inverted: false, source: "embedded" }];
+}
+
+test("follow leans fully on densely sampled scripts, jitter and all", () => {
+  const swing = (chs, name) => Math.max(...chs.find((c) => c.name === name).actions.map((a) => Math.abs(a.pos - 50)));
+  const sparse = gen(strokeScript(), profile("sr6"));
+  for (const scripts of [denseScript(0), denseScript(2)]) {
+    const dense = gen(scripts, profile("sr6"));
+    for (const name of ["pitch", "surge"]) {
+      assert.ok(swing(dense, name) >= 0.95 * swing(sparse, name), `${name}: ${swing(dense, name)} vs ${swing(sparse, name)}`);
+    }
+  }
+});
+
+test("follow holds still while the stroke pauses mid-stroke", () => {
+  const acts = [{ at: 0, pos: 0 }, { at: 400, pos: 50 }, { at: 2400, pos: 50 }, { at: 2800, pos: 100 }, { at: 3200, pos: 0 }];
+  const pitch = gen([{ name: "stroke", actions: acts, inverted: false }], profile("osr2"))
+    .find((c) => c.name === "pitch").actions;
+  const held = Core.valueAt(pitch, 400);
+  assert.ok(Math.abs(held - 50) > 10, "leans at the middle of the stroke");
+  for (const t of [800, 1400, 2000, 2400]) assert.equal(Core.valueAt(pitch, t), held);
+  assert.equal(Core.valueAt(pitch, 2800), 50); // centred at the turning point
+});
