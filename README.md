@@ -68,6 +68,29 @@ so you can tune mappings without hardware.
 The preview uses [osr-emu](https://github.com/ayvasoftware/osr-emu) (MIT, includes three.js, MIT). The ~8 MB file
 in `vendor/` is served locally by Stash and only loaded when you open the preview. See `vendor/THIRD_PARTY_NOTICES.md`.
 
+## Filling in missing axes
+
+Many scripts only have a stroke. **Device settings → Fill in missing axes** (Off / Gentle / Medium / Strong,
+off by default) makes up the other axes from it:
+
+| Axis | Gets | Feels like |
+|---|---|---|
+| Pitch (R2), Surge (L1, half) | the stroke shifted by a quarter cycle | leans one way going up, the other way going down, centred at the turning points |
+| Roll (R1), Twist (R0), Sway (L2, half) | smooth random wander | drifts while the stroke moves, faster when it is busy, frozen during holds, less near the stroke's ends |
+| Vibe (V0), with *Vibration follows stroke speed* | how fast the stroke moves | stronger in busy parts, quiet in pauses |
+
+- Only axes your device has enabled are filled (OSR2: pitch, roll, twist; SR6 adds surge and sway), and never
+  an axis the script already has.
+- Everything is calculated from the script when it loads: the same scene always moves the same way, and the
+  generated channels show up in the Interactive tab (badge *generated*) with their own preview line, so you can
+  remap, invert, narrow or switch them off like any other channel. Generated motion is never faster than the
+  stroke itself.
+- **Per scene:** the Interactive tab has its own *Fill in missing axes* choice (Default follows the device
+  setting); Save stores it with the scene.
+
+The idea of generating motion that only runs while the stroke moves comes from
+[MultiFunPlayer](https://github.com/Yoooi0/MultiFunPlayer)'s motion providers (MIT).
+
 ## Supported script formats
 
 | Format | Structure |
@@ -98,14 +121,16 @@ Separate files take priority over embedded channels with the same name.
 
 | What | Where |
 |---|---|
-| Device profile (baud, rate, axis limits, invert, speed limits, default channel map, offsets) | Stash plugin config (`plugins.TCodePlayer.profile`, JSON string) |
-| Per-scene mapping | Scene custom field **`tcode_map`** (JSON string) |
+| Device profile (baud, rate, axis limits, invert, speed limits, default channel map, offsets, fill-in level `generate` and `generateVibe`) | Stash plugin config (`plugins.TCodePlayer.profile`, JSON string) |
+| Per-scene mapping, offset and fill-in level | Scene custom field **`tcode_map`** (JSON string) |
 
 `tcode_map` only contains what differs from the defaults. If nothing is customised, the field is removed:
 
 ```json
-{ "v": 2, "offsetMs": 40, "channels": { "pitch": { "invert": true, "min": 20, "max": 80 }, "surge": { "axis": "off" } } }
+{ "v": 2, "offsetMs": 40, "generate": "gentle", "channels": { "pitch": { "invert": true, "min": 20, "max": 80 }, "surge": { "axis": "off" } } }
 ```
+
+`generate` (`off`, `gentle`, `medium`, `strong`) is only present when the scene overrides the device setting.
 
 Stash custom fields can't hold objects, so the value is stored as a JSON string. You can also edit it by hand
 in the scene's Edit tab. Channel names that don't exist in the current script are ignored.

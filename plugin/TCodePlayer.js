@@ -91,6 +91,8 @@
       offsetMs: 0,
       autoConnect: true,
       homeOnPause: false,
+      generate: "off",    // fill in missing axes from the stroke: off | gentle | medium | strong
+      generateVibe: false, // also make vibration (V0) from stroke speed
       axes,
       channelMap: Object.assign({}, DEFAULT_CHANNEL_MAP),
       sidecar: { enabled: false, mappings: [] }, // [{ fs: "/media/videos", url: "/custom/videos" }]
@@ -110,6 +112,8 @@
     out.baud = num(out.baud, 115200);
     out.rampMs = clamp(num(out.rampMs, 400), 0, 3000);
     out.offsetMs = num(out.offsetMs, 0);
+    if (!(out.generate in GENERATE_LEVELS)) out.generate = "off";
+    out.generateVibe = !!out.generateVibe;
     const model = DEVICE_PRESETS[p.model] ? p.model : detectModel(out.axes);
     return applyPreset(out, model); // a preset is authoritative for which axes are enabled
   }
@@ -292,6 +296,159 @@
     return dup;
   }
 
+  /* ----------------------------------------------------------------------
+   * Generated axes: when a script only has a stroke, make up the missing
+   * axes from it. Everything is derived from the stroke and calculated once
+   * per script, so it is the same every time, shows in the graphs and the 3D
+   * preview, and stops when the stroke stops. Ideas from MultiFunPlayer's
+   * motion providers (MIT), driven by stroke travel instead of wall time.
+   * -------------------------------------------------------------------- */
+
+  // level -> how far generated motion may swing (0..1 of half the range) and the vibe ceiling
+  const GENERATE_LEVELS = {
+    off: null,
+    gentle: { motion: 0.3, vibe: 0.5 },
+    medium: { motion: 0.55, vibe: 0.75 },
+    strong: { motion: 0.85, vibe: 1 },
+  };
+
+  // which pattern fills which channel; gain scales the level, rate = noise cycles per full-range stroke
+  const GENERATORS = [
+    { name: "pitch", kind: "follow", gain: 1 },
+    { name: "roll", kind: "noise", gain: 1, rate: 0.5, seed: 1 },
+    { name: "twist", kind: "noise", gain: 1, rate: 0.35, seed: 2 },
+    { name: "surge", kind: "follow", gain: 0.5 },
+    { name: "sway", kind: "noise", gain: 0.5, rate: 0.35, seed: 3 },
+    { name: "vib", kind: "speed", vibe: true },
+  ];
+
+  function hashString(s) {
+    let x = 2166136261;
+    for (let i = 0; i < s.length; i++) x = Math.imul(x ^ s.charCodeAt(i), 16777619);
+    return x >>> 0;
+  }
+
+  /** Deterministic value in [-1, 1] for lattice point i. */
+  function latticeValue(i, seed) {
+    let x = Math.imul(i | 0, 374761393) ^ Math.imul(seed | 0, 668265263);
+    x = Math.imul(x ^ (x >>> 13), 1274126177);
+    x ^= x >>> 16;
+    return (x >>> 0) / 4294967295 * 2 - 1;
+  }
+
+  /** Smooth 1D value noise, two octaves, roughly [-1, 1]. */
+  function noise1(u, seed) {
+    const oct = (v, sd) => {
+      const i = Math.floor(v), f = v - i, w = f * f * (3 - 2 * f);
+      return latticeValue(i, sd) + (latticeValue(i + 1, sd) - latticeValue(i, sd)) * w;
+    };
+    return clamp((oct(u, seed) + 0.5 * oct(u * 2.03 + 17.3, seed + 101)) / 1.5 * 1.6, -1, 1);
+  }
+
+  /**
+   * Follow: leans one way while the stroke goes up and the other way while it goes down, centred
+   * at the turning points - the stroke shifted by a quarter cycle. Bigger strokes lean further, and
+   * it never moves faster than amp x the stroke's own speed.
+   */
+  function genFollow(acts, amp) {
+    const out = [];
+    for (let i = 0; i < acts.length; i++) {
+      const a = acts[i];
+      out.push({ at: a.at, pos: 50 });
+      const b = acts[i + 1];
+      if (b && b.at > a.at) out.push({ at: (a.at + b.at) / 2, pos: 50 + amp * (b.pos - a.pos) / 2 });
+    }
+    return out;
+  }
+
+  /**
+   * Noise: wanders smoothly, but its clock is the distance the stroke has travelled, so it moves
+   * faster when the stroke is busy and freezes during holds. Swings less near the stroke's ends.
+   */
+  function genNoise(acts, amp, rate, seed) {
+    const val = (u, s) => {
+      const edge = (s - 50) / 50;
+      return clamp(50 + amp * 50 * noise1(u, seed) * (1 - 0.5 * edge * edge), 0, 100);
+    };
+    const out = [{ at: acts[0].at, pos: val(0, acts[0].pos) }];
+    let u = 0;
+    for (let i = 0; i + 1 < acts.length; i++) {
+      const a = acts[i], b = acts[i + 1];
+      const du = Math.abs(b.pos - a.pos) / 100 * rate;
+      const steps = Math.max(1, Math.ceil(du * 4));
+      for (let k = 1; k <= steps; k++) {
+        const f = k / steps;
+        out.push({ at: a.at + (b.at - a.at) * f, pos: val(u + du * f, a.pos + (b.pos - a.pos) * f) });
+      }
+      u += du;
+    }
+    return out;
+  }
+
+  /** Speed: intensity follows how fast the stroke moves, relative to this script's busy parts. */
+  function genSpeed(acts, ceiling) {
+    const n = acts.length;
+    const speeds = [];
+    for (let i = 0; i + 1 < n; i++) {
+      const dt = acts[i + 1].at - acts[i].at;
+      speeds.push(dt > 0 ? Math.abs(acts[i + 1].pos - acts[i].pos) / dt * 1000 : 0);
+    }
+    const moving = speeds.filter((v) => v > 0).sort((x, y) => x - y);
+    if (!moving.length) return [];
+    const ref = Math.max(50, moving[Math.floor((moving.length - 1) * 0.9)]); // 90th percentile = full
+    const raw = speeds.map((v) => clamp(v / ref, 0, 1));
+    const lvl = raw.map((v, i) => ((raw[i - 1] != null ? raw[i - 1] : v) + 2 * v + (raw[i + 1] != null ? raw[i + 1] : v)) / 4);
+    const out = [{ at: acts[0].at, pos: 0 }];
+    for (let i = 0; i + 1 < n; i++) {
+      const a = acts[i], b = acts[i + 1];
+      const pos = 100 * ceiling * (raw[i] ? lvl[i] : 0);
+      if (b.at - a.at > 1000) {
+        // long segments (holds, slow moves) settle to their own level instead of a slow ramp
+        out.push({ at: a.at + 250, pos }, { at: b.at - 250, pos });
+      } else if (b.at > a.at) {
+        out.push({ at: (a.at + b.at) / 2, pos });
+      }
+    }
+    out.push({ at: acts[n - 1].at + 300, pos: 0 });
+    return out;
+  }
+
+  /** The stroke channel generation works from: "stroke", else whatever maps to L0 by default. */
+  function strokeChannel(channels, profile) {
+    return channels.find((c) => c.name === "stroke") ||
+      channels.find((c) => defaultEntry(c.name, profile).axis === "L0") || null;
+  }
+
+  /**
+   * Channels to add for the axes a script doesn't cover. Only fills axes the device has enabled and
+   * no script channel targets; vibration only with profile.generateVibe.
+   */
+  function generateChannels(scriptChannels, profile, level, seedKey) {
+    const lv = GENERATE_LEVELS[level];
+    if (!lv) return [];
+    const stroke = strokeChannel(scriptChannels, profile);
+    if (!stroke || stroke.actions.length < 2) return [];
+    const acts = stroke.inverted ? stroke.actions.map((a) => ({ at: a.at, pos: 100 - a.pos })) : stroke.actions;
+    const taken = new Set();
+    scriptChannels.forEach((c) => { taken.add(c.name); taken.add(defaultEntry(c.name, profile).axis); });
+    const seed = hashString(String(seedKey || ""));
+    const out = [];
+    for (const g of GENERATORS) {
+      const axis = defaultEntry(g.name, profile).axis;
+      if (axis === "off" || taken.has(g.name) || taken.has(axis)) continue;
+      if (!profile.axes[axis] || !profile.axes[axis].enabled) continue;
+      if (g.vibe && !profile.generateVibe) continue;
+      let actions;
+      if (g.kind === "follow") actions = genFollow(acts, lv.motion * g.gain);
+      else if (g.kind === "noise") actions = genNoise(acts, lv.motion * g.gain, g.rate, (seed + g.seed) | 0);
+      else actions = genSpeed(acts, lv.vibe);
+      if (!actions.length) continue;
+      taken.add(axis);
+      out.push({ name: g.name, actions, inverted: false, source: "generated" });
+    }
+    return out;
+  }
+
   /** Build sidecar URL for a video path using the configured served-folder mappings. */
   function sidecarUrl(videoPath, mappings, name, baseUri) {
     if (!videoPath) return null;
@@ -324,11 +481,13 @@
       o = o.files[legacyKey] || Object.values(o.files)[0] || {};
     }
     const channels = o.channels && typeof o.channels === "object" ? o.channels : {};
-    return { v: 2, offsetMs: num(o.offsetMs, 0), channels };
+    const out = { v: 2, offsetMs: num(o.offsetMs, 0), channels };
+    if (o.generate in GENERATE_LEVELS) out.generate = o.generate; // absent = use the device setting
+    return out;
   }
 
   function isEmptyFileCfg(fc) {
-    return !fc || (!num(fc.offsetMs, 0) && Object.keys(fc.channels || {}).length === 0);
+    return !fc || (!num(fc.offsetMs, 0) && !fc.generate && Object.keys(fc.channels || {}).length === 0);
   }
 
   function fileKeyOf(file) {
@@ -343,6 +502,7 @@
     parseFunscript, mergeChannels, valueAt, resolveMapping, stripDefaults,
     applyChannelMap, applyAxisCaps, tcodeCommand, computeTargets, findConflicts,
     sidecarUrl, parseSceneCfg, isEmptyFileCfg, fileKeyOf, normalizeChannelName,
+    GENERATE_LEVELS, generateChannels, noise1,
   };
 
   if (typeof module !== "undefined" && module.exports) {
@@ -410,6 +570,13 @@
    * ==================================================================== */
 
   const encoder = new TextEncoder();
+  /** Working copy of a saved scene config. */
+  function editOf(saved) {
+    const e = { offsetMs: num(saved && saved.offsetMs, 0), channels: clone((saved && saved.channels) || {}) };
+    if (saved && saved.generate) e.generate = saved.generate;
+    return e;
+  }
+
   const PORT_KEY = "tcp-port"; // getInfo() of the port this plugin last opened
 
   function portId(port) {
@@ -432,7 +599,8 @@
       sceneCfg: null,    // full saved custom-field object
       edit: null,        // working copy for the current file { offsetMs, channels }
       dirty: false,
-      channels: [],
+      scriptChannels: [], // as loaded from the script files
+      channels: [],       // scriptChannels + generated ones (mapping[i] belongs to channels[i])
       scriptVersion: null,
       scriptState: "idle", // idle | loading | ready | none | error
       scriptError: null,
@@ -461,6 +629,7 @@
     _loadToken: 0,
     _liveNotify: 0,
     _sceneRefs: 0,
+    _genCache: null,
 
     subscribe(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); },
     set(patch) { Object.assign(this.state, patch); this._listeners.forEach((fn) => fn()); },
@@ -683,8 +852,9 @@
         },
         fileKey,
         sceneCfg,
-        edit: { offsetMs: num(saved.offsetMs, 0), channels: clone(saved.channels || {}) },
+        edit: editOf(saved),
         dirty: false,
+        scriptChannels: [],
         channels: [],
         scriptVersion: null,
         scriptState: "idle",
@@ -702,7 +872,7 @@
       this._stopVideoWatch();
       this._attachVideo(null);
       if (this.hasOutput()) this.home(800);
-      this.set({ scene: null, fileKey: null, channels: [], mapping: [], edit: null, dirty: false, scriptState: "idle" });
+      this.set({ scene: null, fileKey: null, scriptChannels: [], channels: [], mapping: [], edit: null, dirty: false, scriptState: "idle" });
     },
 
     async loadScripts() {
@@ -747,7 +917,7 @@
       if (token !== this._loadToken) return;
       const channels = mergeChannels(embedded, sidecars);
       this.set({
-        channels,
+        scriptChannels: channels,
         scriptVersion: version,
         scriptState: channels.length ? "ready" : (error ? "error" : "none"),
         scriptError: error,
@@ -757,9 +927,39 @@
 
     /* ---------- mapping edits ---------- */
     recompute() {
-      const mapping = resolveMapping(this.state.channels, this.state.profile, this.state.edit);
-      this.set({ mapping, conflicts: findConflicts(mapping) });
+      const st = this.state;
+      const channels = st.scriptChannels.concat(this._generated());
+      const mapping = resolveMapping(channels, st.profile, st.edit);
+      this.set({ channels, mapping, conflicts: findConflicts(mapping) });
       this.updateLoop();
+    },
+
+    /** Level for the current scene: its own choice, else the device setting. */
+    generateLevel() {
+      const e = this.state.edit;
+      return (e && e.generate) || this.state.profile.generate;
+    },
+
+    _generated() {
+      const st = this.state;
+      if (!st.scene || !st.scriptChannels.length) return [];
+      const level = this.generateLevel();
+      const p = st.profile;
+      const key = JSON.stringify([st.scene.id, level, p.generateVibe, p.channelMap,
+        AXES.filter((a) => p.axes[a].enabled)]);
+      const c = this._genCache;
+      if (c && c.scripts === st.scriptChannels && c.key === key) return c.result;
+      const result = generateChannels(st.scriptChannels, p, level, st.scene.id);
+      this._genCache = { scripts: st.scriptChannels, key, result };
+      return result;
+    },
+
+    setSceneGenerate(level) {
+      if (!this.state.edit) return;
+      const edit = Object.assign({}, this.state.edit);
+      if (level in GENERATE_LEVELS) edit.generate = level; else delete edit.generate;
+      this.set({ edit, dirty: true });
+      this.recompute();
     },
 
     setChannel(name, patch) {
@@ -786,7 +986,7 @@
 
     revertScene() {
       const saved = this.state.sceneCfg || { offsetMs: 0, channels: {} };
-      this.set({ edit: { offsetMs: num(saved.offsetMs, 0), channels: clone(saved.channels || {}) }, dirty: false });
+      this.set({ edit: editOf(saved), dirty: false });
       this.recompute();
     },
 
@@ -797,6 +997,7 @@
       const cfg = { v: 2 };
       if (num(e.offsetMs, 0)) cfg.offsetMs = num(e.offsetMs, 0);
       cfg.channels = clone(e.channels || {});
+      if (e.generate) cfg.generate = e.generate;
       // nothing customised -> remove the field entirely
       const value = isEmptyFileCfg(cfg) ? null : JSON.stringify(cfg);
       await saveSceneField(s.id, value);
@@ -964,6 +1165,17 @@
     error: "Error",
   };
 
+  const LEVEL_LABELS = { off: "Off", gentle: "Gentle", medium: "Medium", strong: "Strong" };
+
+  function LevelOptions() {
+    return Object.keys(GENERATE_LEVELS).map((k) => h("option", { key: k, value: k }, LEVEL_LABELS[k]));
+  }
+
+  function channelCount(s) {
+    const n = s.scriptChannels.length, g = s.channels.length - n;
+    return `${n} channel${n === 1 ? "" : "s"}` + (g > 0 ? ` + ${g} generated` : "");
+  }
+
   function UnsupportedNotice() {
     const s = engine.state;
     if (s.supported) return null;
@@ -1026,7 +1238,7 @@
             }),
             s.scene && h("div", { className: "tcp-muted tcp-small" },
               s.scriptState === "ready"
-                ? `${s.channels.length} channel${s.channels.length === 1 ? "" : "s"} loaded for this scene`
+                ? `${channelCount(s)} for this scene`
                 : s.scriptState === "loading" ? "Loading scripts…" : "No script for this scene"),
             h("div", { className: "tcp-row tcp-mt" },
               h(Button, { size: "sm", variant: "secondary", onClick: () => { setMenuOpen(false); setShowSettings(true); } },
@@ -1122,6 +1334,15 @@
           h("label", null, "Global offset (ms)"), h(NumberInput, { value: p.offsetMs, step: 10, onChange: (v) => upd({ offsetMs: v }) })),
         h(Form.Check, { type: "switch", id: "tcp-auto", label: "Reconnect to the last device automatically", checked: !!p.autoConnect, onChange: (e) => upd({ autoConnect: e.target.checked }) }),
         h(Form.Check, { type: "switch", id: "tcp-home", label: "Return to home position when paused", checked: !!p.homeOnPause, onChange: (e) => upd({ homeOnPause: e.target.checked }) }),
+        h("div", { className: "tcp-row tcp-mt" },
+          h("label", { className: "mb-0" }, "Fill in missing axes"),
+          h(Form.Control, {
+            as: "select", size: "sm", className: "tcp-select", value: p.generate,
+            onChange: (e) => upd({ generate: e.target.value }),
+          }, h(LevelOptions))),
+        h(Form.Check, { type: "switch", id: "tcp-gen-vib", label: "Vibration follows stroke speed (V0)", checked: !!p.generateVibe, onChange: (e) => upd({ generateVibe: e.target.checked }) }),
+        h("p", { className: "tcp-muted tcp-small" },
+          "Scripts that only have a stroke get pitch, roll and twist (surge/sway on SR6) made from the stroke. Can be changed per scene."),
 
         h("h6", { className: "tcp-mt" }, "Axes (device limits)"),
         h("p", { className: "tcp-muted tcp-small" }, "Min/Max scale the full script range into this window (lerp), so motion keeps its shape. Speed limit is in % of range per second (0 = off)."),
@@ -1380,7 +1601,7 @@
 
       s.channels.length > 0 && h(React.Fragment, null,
         h("div", { className: "tcp-row tcp-muted tcp-small" },
-          h("span", null, `Format ${s.scriptVersion || "1.0"} · ${s.channels.length} channel${s.channels.length === 1 ? "" : "s"}`),
+          h("span", null, `Format ${s.scriptVersion || "1.0"} · ${channelCount(s)}`),
           h("span", { className: "tcp-grow" }),
           hasCustom
             ? h(Badge, { variant: "info" }, `Custom mapping${customCount ? ` (${customCount})` : ""}`)
@@ -1398,6 +1619,7 @@
             h("div", { className: "tcp-ch-head" },
               h("b", null, m.name),
               ch.source === "file" && h(Badge, { variant: "secondary", className: "ml-1" }, "file"),
+              ch.source === "generated" && h(Badge, { variant: "secondary", className: "ml-1", title: "Made from the stroke" }, "generated"),
               m.custom && h(Badge, { variant: "info", className: "ml-1" }, "custom"),
               h("span", { className: "tcp-grow" }),
               h(Meter, { value: m.axis !== "off" ? s.live[m.axis] : null })),
@@ -1419,7 +1641,15 @@
 
         h("div", { className: "tcp-row tcp-mt" },
           h("label", { className: "mb-0" }, "Scene offset (ms)"),
-          h(NumberInput, { value: s.edit ? s.edit.offsetMs : 0, step: 10, width: 100, onChange: (v) => engine.setSceneOffset(v) })),
+          h(NumberInput, { value: s.edit ? s.edit.offsetMs : 0, step: 10, width: 100, onChange: (v) => engine.setSceneOffset(v) }),
+          strokeChannel(s.scriptChannels, s.profile) && h(React.Fragment, null,
+            h("label", { className: "mb-0 ml-3" }, "Fill in missing axes"),
+            h(Form.Control, {
+              as: "select", size: "sm", className: "tcp-select", value: (s.edit && s.edit.generate) || "",
+              onChange: (e) => engine.setSceneGenerate(e.target.value),
+            },
+              h("option", { value: "" }, `Default (${LEVEL_LABELS[s.profile.generate]})`),
+              h(LevelOptions)))),
 
         h("div", { className: "tcp-row tcp-mt" },
           h(Button, { variant: "primary", size: "sm", disabled: !s.dirty || saving, onClick: save },
