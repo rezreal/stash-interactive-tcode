@@ -1,0 +1,47 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax check
+        run: node --check plugin/TCodePlayer.js
+      - name: Test
+        run: node --test test/*.test.js
+      - name: Build package source
+        run: ./build.sh
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  # Pages is not available for a private repo on a free plan, and publishing is
+  # a deliberate act anyway - so this stays skipped until the repo is public.
+  # Flip it public and the next push publishes with no further changes.
+  deploy:
+    needs: build
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

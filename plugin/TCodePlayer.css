@@ -1,0 +1,175 @@
+/* TCode Player – Stash UI plugin */
+
+.tcp-nav-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+}
+.tcp-nav-toggle .tcp-dot {
+  position: absolute;
+  right: 4px;
+  bottom: 6px;
+  width: 7px;
+  height: 7px;
+}
+.tcp-nav-menu {
+  min-width: 300px;
+  padding: 0;
+}
+.tcp-nav-body {
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.tcp-nav-title {
+  font-weight: 600;
+}
+
+.tcp-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.tcp-grow { flex: 1 1 auto; }
+.tcp-mt { margin-top: 0.75rem; }
+.tcp-muted { opacity: 0.65; }
+.tcp-small { font-size: 0.8rem; }
+
+.tcp-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #6c757d;
+  flex: 0 0 auto;
+}
+.tcp-dot-connecting { background: #f0ad4e; }
+.tcp-dot-connected { background: #3d9970; }
+.tcp-dot-live { background: #2ecc71; box-shadow: 0 0 6px #2ecc71; }
+.tcp-dot-error { background: #d9534f; }
+
+.tcp-notice,
+.tcp-error {
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  margin: 0.5rem 0;
+}
+.tcp-notice { background: rgba(240, 173, 78, 0.15); }
+.tcp-error { background: rgba(217, 83, 79, 0.18); }
+
+/* scene tab */
+.tcp-panel { padding: 0.5rem 0; }
+.tcp-header { margin-bottom: 0.5rem; }
+
+.tcp-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+.tcp-channel {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+}
+.tcp-channel.tcp-off { opacity: 0.55; }
+.tcp-ch-head {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+.tcp-ch-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.35rem;
+}
+.tcp-ch-controls .form-check { margin-bottom: 0; }
+
+.tcp-spark {
+  display: block;
+  width: 100%;
+  height: 26px;
+  color: #8fb8de;
+}
+
+.tcp-meter {
+  width: 70px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.tcp-meter-fill {
+  height: 100%;
+  background: #2ecc71;
+  transition: width 0.1s linear;
+}
+
+.tcp-select { width: auto; min-width: 150px; }
+.tcp-num { width: 110px; }
+
+.tcp-range {
+  display: grid;
+  grid-template-columns: 110px auto;
+  grid-template-rows: auto auto;
+  column-gap: 0.5rem;
+  align-items: center;
+  min-width: 170px;
+}
+.tcp-range input { grid-column: 1; height: 1rem; }
+.tcp-range-label {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+/* settings modal */
+.tcp-modal h6 { margin-top: 1.25rem; font-weight: 600; }
+.tcp-modal h6:first-child { margin-top: 0; }
+.tcp-grid {
+  display: grid;
+  grid-template-columns: max-content 120px;
+  gap: 0.4rem 1rem;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+.tcp-grid label { margin: 0; }
+.tcp-table td,
+.tcp-table th { vertical-align: middle; }
+.tcp-table .form-check { margin: 0; }
+
+@media (max-width: 576px) {
+  .tcp-ch-controls { gap: 0.5rem; }
+  .tcp-select { min-width: 120px; }
+}
+
+.tcp-table tr.tcp-off td { opacity: 0.45; }
+.tcp-table tr.tcp-off td:nth-child(2) { opacity: 1; } /* keep the "On" checkbox fully visible */
+
+/* 3D preview */
+.tcp-preview-section { margin: 0.5rem 0 0.75rem; }
+.tcp-preview {
+  position: relative;
+  margin-top: 0.5rem;
+  height: 300px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.25);
+}
+.tcp-preview-canvas { position: absolute; inset: 0; }
+.tcp-preview-canvas canvas { display: block; }
+.tcp-preview-msg {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+}

@@ -1,0 +1,12 @@
+name: TCode Player
+description: Plays single- and multi-axis funscripts (1.0 / 1.1 axes / 2.0 channels) on OSR2/SR6 devices over Web Serial, with an optional 3D preview. Global device profile in plugin config, per-scene channel mapping in the scene custom field "tcode_map".
+version: 0.3.0
+url: https://github.com/rezreal/stash-interactive-tcode
+ui:
+  javascript:
+    - TCodePlayer.js
+  css:
+    - TCodePlayer.css
+  # served at /plugin/TCodePlayer/assets/vendor/... (3D preview, loaded on demand)
+  assets:
+    /vendor: vendor

@@ -1,0 +1,5 @@
+dist/
+node_modules/
+.claude/
+# local agent notes, not part of the repo
+HANDOFF.md
