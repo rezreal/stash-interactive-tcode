@@ -165,7 +165,13 @@ script pos (0–100)
   → TCode  e.g.  L05166I17 R17583I17 R22417I17
 ```
 
-Defaults: 115200 baud, 60 Hz updates (one tick look-ahead), 400 ms ramp after play/seek so the device doesn't jump.
+Defaults: 115200 baud, 60 Hz updates, 400 ms ramp after play/seek so the device doesn't jump.
+
+Each command aims just past when the next one should arrive (the measured spacing between commands plus a
+tenth) and uses that as its move time, so the device neither stands waiting between commands nor gets cut
+short in fast sequences. If the port is still busy with the previous write, the next command waits for it
+instead of being skipped, and only axes that changed are sent. While sending, the navbar menu shows the
+commands per second, the slowest write and the longest gap of the last second.
 The default device is OSR2, so surge/sway channels are ignored until you select SR6 (or enable L1/L2 in Custom).
 
 ## Debugging

@@ -670,6 +670,7 @@
       testing: false,
       previews: 0,       // number of mounted 3D previews (they act as virtual devices)
       live: {},
+      stats: null,       // { fps, writeMs, maxGapMs } of the last second while sending
     },
     _listeners: new Set(),
     _emus: new Set(),
@@ -679,6 +680,11 @@
     _readDone: null,
     _writing: false,
     _writable: null,
+    _frameWaiting: false, // a frame is due while a write is still in flight: send it when that finishes
+    _lastSendAt: 0,
+    _gapMs: 0,            // smoothed time between frames that went out
+    _clock: null,         // video clock smoothing { media, wall }
+    _stats: null,
     _writeFails: 0,
     _recovering: null,
     _reopens: null,
@@ -880,10 +886,17 @@
       this._emus.forEach((emu) => { try { emu.write(line + "\n"); } catch (e) { /* ignore */ } });
       if (!this._writer) return this._emus.size > 0;
       this._writing = true;
+      const started = performance.now();
       this._writer.write(encoder.encode(line + "\n"))
-        .then(() => { this._writeFails = 0; })
+        .then(() => {
+          this._writeFails = 0;
+          if (this._stats) this._stats.writeMs = Math.max(this._stats.writeMs, performance.now() - started);
+        })
         .catch((e) => this._onWriteError(e))
-        .finally(() => { this._writing = false; });
+        .finally(() => {
+          this._writing = false;
+          if (this._frameWaiting) { this._frameWaiting = false; this._tick(); }
+        });
       return true;
     },
 
@@ -1261,7 +1274,7 @@
       this._video = video;
       this._videoHandlers = null;
       if (video) {
-        const resync = () => { this._rampPending = true; this.updateLoop(); };
+        const resync = () => { this._rampPending = true; this._clock = null; this.updateLoop(); };
         const onPause = () => {
           this.updateLoop();
           if (this.state.profile.homeOnPause && this.hasOutput()) this.home(800);
@@ -1298,6 +1311,9 @@
     _stopTimer() {
       if (this._timer) clearInterval(this._timer);
       this._timer = null;
+      this._frameWaiting = false;
+      this._stats = null;
+      if (this.state.stats) this.set({ stats: null });
       this._setLube("auto", false); // pause, seek, output off, scene left: stop squirting
     },
 
@@ -1305,40 +1321,98 @@
       if (this._timer) { this._stopTimer(); this.updateLoop(); }
     },
 
+    /**
+     * Video time in ms, smoothed: extrapolated from the wall clock between reads and gently pulled
+     * towards what the player reports, so a currentTime that advances in steps can't make it jump.
+     */
+    _mediaTime(v, now) {
+      const reported = v.currentTime * 1000, rate = v.playbackRate || 1;
+      const c = this._clock;
+      if (c) {
+        const predicted = c.media + (now - c.wall) * rate;
+        if (Math.abs(predicted - reported) < 50) {
+          c.media += (reported - predicted) * 0.1;
+          return c.media + (now - c.wall) * rate;
+        }
+      }
+      this._clock = { media: reported, wall: now };
+      return reported;
+    },
+
+    /*
+     * One output frame. Each command aims just past when the next frame should arrive (the measured
+     * frame spacing plus a tenth) and uses that as its move time. Shorter, and the device arrives
+     * early and stands waiting - with a fixed 17 ms it moved, stopped, moved. Much longer, and every
+     * command only gets part way before the next replaces it, which flattens fast strokes. A frame
+     * due while a write is still in flight waits for it instead of being dropped, and only axes that
+     * changed are sent (as MultiFunPlayer does).
+     */
     _tick() {
       const v = this._video;
       if (!v || !this._shouldRun()) { this.updateLoop(); return; }
       const now = performance.now();
       const p = this.state.profile;
       const dt = 1000 / p.rateHz;
+      const lead = clamp(1.1 * (this._gapMs || dt), dt, 60);
       const offset = num(p.offsetMs, 0) + num(this.state.edit && this.state.edit.offsetMs, 0);
-      const t = v.currentTime * 1000 + offset + dt; // aim one tick ahead
+      const t = this._mediaTime(v, now) + offset + lead;
       const targets = computeTargets(this.state.channels, this.state.mapping, p, t);
       this._setLube("auto", targets[LUBE.axis] > LUBE.threshold);
       if (now < this._rampUntil) return; // let the device finish the resync move
+      if (this._writer && this._writing) { this._frameWaiting = true; return; }
 
-      let interval = dt;
-      if (this._rampPending) {
-        interval = p.rampMs || dt;
+      let interval = lead;
+      const ramp = this._rampPending;
+      if (ramp) {
+        interval = p.rampMs || lead;
         this._rampPending = false;
         this._rampUntil = now + interval;
       } else {
-        // per-axis speed limits (percent of range per second)
+        // per-axis speed limits (percent of range per second), over the time since the last frame
+        const elapsed = this._lastSendAt ? now - this._lastSendAt : dt;
         for (const a of Object.keys(targets)) {
           const sp = num(p.axes[a].speed, 0);
           if (sp > 0 && this._last[a] != null) {
-            const maxStep = (sp / 100) * (dt / 1000);
+            const maxStep = (sp / 100) * (elapsed / 1000);
             targets[a] = clamp(targets[a], this._last[a] - maxStep, this._last[a] + maxStep);
           }
         }
+        // only what changed (TCode resolves 1/9999)
+        for (const a of Object.keys(targets)) {
+          if (this._last[a] != null && Math.abs(targets[a] - this._last[a]) < 0.5 / 9999) delete targets[a];
+        }
       }
 
+      if (!Object.keys(targets).length) return;
       if (this.sendTargets(targets, interval)) {
         Object.assign(this._last, targets);
+        this._countFrame(now, ramp);
         if (now - this._liveNotify > 100) {
           this._liveNotify = now;
           this.set({ live: Object.assign({}, this._last) });
         }
+      }
+    },
+
+    /** Frame spacing for the look-ahead, and a once-a-second readout of how sending goes. */
+    _countFrame(now, ramp) {
+      if (this._lastSendAt && !ramp) {
+        const gap = now - this._lastSendAt;
+        if (gap < 500) this._gapMs = this._gapMs ? this._gapMs * 0.9 + gap * 0.1 : gap;
+        if (this._stats) this._stats.maxGapMs = Math.max(this._stats.maxGapMs, gap);
+      }
+      this._lastSendAt = ramp ? 0 : now; // the pause after a ramp is not frame spacing
+      const st = this._stats || (this._stats = { since: now, frames: 0, writeMs: 0, maxGapMs: 0 });
+      st.frames++;
+      if (now - st.since >= 1000) {
+        this.set({
+          stats: {
+            fps: Math.round(st.frames * 1000 / (now - st.since)),
+            writeMs: Math.round(st.writeMs),
+            maxGapMs: Math.round(st.maxGapMs),
+          },
+        });
+        this._stats = { since: now, frames: 0, writeMs: 0, maxGapMs: 0 };
       }
     },
 
@@ -1521,6 +1595,10 @@
             h("div", { className: "tcp-muted tcp-small" },
               (DEVICE_PRESETS[s.profile.model] || DEVICE_PRESETS.custom).label,
               s.deviceInfo ? " · " + s.deviceInfo : ""),
+            s.stats && s.status === "connected" && h("div", {
+              className: "tcp-muted tcp-small",
+              title: "Commands per second, slowest write and longest gap between commands in the last second",
+            }, `Sending ${s.stats.fps}/s · write ${s.stats.writeMs} ms · gap ${s.stats.maxGapMs} ms`),
             h(Form.Check, {
               type: "switch", id: uid + "-out", label: "Send motion to device",
               checked: s.outputEnabled, onChange: (e) => engine.setOutputEnabled(e.target.checked),
