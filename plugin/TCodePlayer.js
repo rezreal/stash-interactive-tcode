@@ -678,6 +678,10 @@
     _reader: null,
     _readDone: null,
     _writing: false,
+    _writable: null,
+    _writeFails: 0,
+    _recovering: null,
+    _reopens: null,
     _timer: null,
     _videoWatch: null,
     _video: null,
@@ -759,13 +763,14 @@
       }
     },
 
-    async _open(port, quiet) {
+    async _open(port, quiet, reopening) {
       if (port.readable) {
         // opened by someone else in this page
         if (!quiet) this.set({ status: "error", error: "This port is already in use by another plugin." });
         return false;
       }
-      this.set({ status: "connecting", error: null, deviceInfo: null, deviceLog: [] });
+      this.set(reopening ? { status: "connecting", error: null }
+        : { status: "connecting", error: null, deviceInfo: null, deviceLog: [] });
       try {
         await port.open({ baudRate: this.state.profile.baud });
       } catch (e) {
@@ -779,7 +784,9 @@
       }
       lsSet(PORT_KEY, portId(port));
       this._port = port;
-      this._writer = port.writable.getWriter();
+      this._writable = port.writable;
+      this._writer = this._writable.getWriter();
+      this._writeFails = 0;
       this._readDone = this._readLoop(port);
       this._last = {};
       this.set({ status: "connected" });
@@ -809,11 +816,16 @@
           }
         }
       } catch (e) {
-        /* reader cancelled or device lost */
+        /* reader cancelled, device lost, or a non-fatal read error (noise, overrun) */
       } finally {
         try { reader.releaseLock(); } catch (e) { /* ignore */ }
       }
       await piped;
+      // still connected: the browser offers a fresh input stream after a non-fatal error
+      if (this._port === port && port.readable) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (this._port === port && port.readable && !port.readable.locked) this._readDone = this._readLoop(port);
+      }
     },
 
     _onLine(line) {
@@ -838,7 +850,7 @@
       try { if (this._readDone) await this._readDone; } catch (e) { /* ignore */ }
       try { if (this._writer) { this._writer.releaseLock(); } } catch (e) { /* ignore */ }
       try { if (port) await port.close(); } catch (e) { /* ignore */ }
-      this._reader = null; this._writer = null; this._readDone = null; this._writing = false;
+      this._reader = null; this._writer = null; this._writable = null; this._readDone = null; this._writing = false;
       this.set({ status: reason ? "error" : "disconnected", error: reason, live: {} });
       this.updateLoop(); // a connected lube launcher or preview keeps following the video
     },
@@ -869,9 +881,50 @@
       if (!this._writer) return this._emus.size > 0;
       this._writing = true;
       this._writer.write(encoder.encode(line + "\n"))
-        .catch((e) => console.warn("[TCodePlayer] write failed", e))
+        .then(() => { this._writeFails = 0; })
+        .catch((e) => this._onWriteError(e))
         .finally(() => { this._writing = false; });
       return true;
+    },
+
+    /*
+     * A failed write leaves the port's output stream broken, and every later write fails at once -
+     * the device just stops. Recover instead of carrying on: take a fresh stream if the browser has
+     * one, else reopen the port (most ESP32 boards restart on that), and give up with a clear error
+     * if it keeps failing. An unplugged device is handled by the disconnect event instead.
+     */
+    _onWriteError(e) {
+      this._writeFails = (this._writeFails || 0) + 1;
+      if (this._writeFails > 1 || !this._port || (e && e.name === "NetworkError")) return;
+      console.warn("[TCodePlayer] write failed, recovering the connection", e);
+      this._onLine("[write failed: " + ((e && (e.name + " " + e.message)) || e) + "]");
+      if (!this._recovering) {
+        this._recovering = this._recoverWriter().finally(() => { this._recovering = null; });
+      }
+    },
+
+    async _recoverWriter() {
+      const port = this._port;
+      if (!port) return;
+      try { this._writer.releaseLock(); } catch (e) { /* ignore */ }
+      this._writer = null;
+      const ws = port.writable;
+      if (ws && ws !== this._writable && !ws.locked) {
+        this._writable = ws;
+        this._writer = ws.getWriter();
+        this._writeFails = 0;
+        this._rampPending = true;
+        return;
+      }
+      const now = Date.now();
+      this._reopens = (this._reopens || []).filter((t) => now - t < 60000);
+      if (this._reopens.length >= 3) {
+        await this._cleanup("The device keeps rejecting data. Check its USB cable and power, then connect again.");
+        return;
+      }
+      this._reopens.push(now);
+      await this._cleanup(null);
+      await this._open(port, false, true);
     },
 
     /** Send absolute device positions {axis: 0..1} with an interval. */
