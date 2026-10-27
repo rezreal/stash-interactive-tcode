@@ -171,7 +171,9 @@ Each command aims just past when the next one should arrive (the measured spacin
 tenth) and uses that as its move time, so the device neither stands waiting between commands nor gets cut
 short in fast sequences. If the port is still busy with the previous write, the next command waits for it
 instead of being skipped, and only axes that changed are sent. While sending, the navbar menu shows the
-commands per second, the slowest write and the longest gap of the last second.
+commands per second, the slowest write and the longest gap of the last second, plus any serial write or read
+errors. A failed write is recovered on the spot - only that one command is lost - but frequent errors usually
+mean the USB link is disturbed, e.g. by the servos' power or electrical noise.
 The default device is OSR2, so surge/sway channels are ignored until you select SR6 (or enable L1/L2 in Custom).
 
 ## Debugging

@@ -88,7 +88,7 @@ test("reopens the port after a failed write and the device gets data again", asy
   assert.equal(engine.state.status, "connected");
   assert.ok(port.ok.length >= 20, `writes reach the device again (${port.ok.length})`);
   assert.equal(warnings.length, 1, "one warning, not one per frame");
-  assert.ok(engine.state.deviceLog.some((l) => l.includes("write failed")), "noted in the device log");
+  assert.ok(engine.state.deviceLog.some((l) => l.includes("write error")), "noted in the device log");
 });
 
 test("takes a fresh stream without reopening when the browser offers one", async () => {

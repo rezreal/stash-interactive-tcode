@@ -775,6 +775,7 @@
         if (!quiet) this.set({ status: "error", error: "This port is already in use by another plugin." });
         return false;
       }
+      if (!reopening) this._errorsLogged = null;
       this.set(reopening ? { status: "connecting", error: null }
         : { status: "connecting", error: null, deviceInfo: null, deviceLog: [] });
       try {
@@ -822,7 +823,8 @@
           }
         }
       } catch (e) {
-        /* reader cancelled, device lost, or a non-fatal read error (noise, overrun) */
+        // reader cancelled, device lost, or a non-fatal read error (garbled or lost bytes)
+        if (this._port === port && e && /Break|Framing|Parity|Overrun/.test(e.name)) this._countError("read", e);
       } finally {
         try { reader.releaseLock(); } catch (e) { /* ignore */ }
       }
@@ -909,11 +911,21 @@
     _onWriteError(e) {
       this._writeFails = (this._writeFails || 0) + 1;
       if (this._writeFails > 1 || !this._port || (e && e.name === "NetworkError")) return;
-      console.warn("[TCodePlayer] write failed, recovering the connection", e);
-      this._onLine("[write failed: " + ((e && (e.name + " " + e.message)) || e) + "]");
+      this._countError("write", e);
       if (!this._recovering) {
         this._recovering = this._recoverWriter().finally(() => { this._recovering = null; });
       }
+    },
+
+    /** Log the first error of a kind per connection, count the rest for the navbar readout. */
+    _countError(kind, e) {
+      const st = this._stats;
+      if (st) st[kind + "Errors"] = (st[kind + "Errors"] || 0) + 1;
+      this._errorsLogged = this._errorsLogged || {};
+      if (this._errorsLogged[kind]) return;
+      this._errorsLogged[kind] = true;
+      console.warn(`[TCodePlayer] ${kind} error (logged once per connection, counted in the menu)`, e);
+      this._onLine(`[${kind} error: ${(e && (e.name + " " + e.message)) || e}]`);
     },
 
     async _recoverWriter() {
@@ -923,10 +935,11 @@
       this._writer = null;
       const ws = port.writable;
       if (ws && ws !== this._writable && !ws.locked) {
+        // only the failed frame was lost and the device kept moving: carry on without a resync ramp,
+        // which would hold the output for rampMs and show as a pause
         this._writable = ws;
         this._writer = ws.getWriter();
         this._writeFails = 0;
-        this._rampPending = true;
         return;
       }
       const now = Date.now();
@@ -1410,6 +1423,8 @@
             fps: Math.round(st.frames * 1000 / (now - st.since)),
             writeMs: Math.round(st.writeMs),
             maxGapMs: Math.round(st.maxGapMs),
+            writeErrors: st.writeErrors || 0,
+            readErrors: st.readErrors || 0,
           },
         });
         this._stats = { since: now, frames: 0, writeMs: 0, maxGapMs: 0 };
@@ -1598,7 +1613,9 @@
             s.stats && s.status === "connected" && h("div", {
               className: "tcp-muted tcp-small",
               title: "Commands per second, slowest write and longest gap between commands in the last second",
-            }, `Sending ${s.stats.fps}/s · write ${s.stats.writeMs} ms · gap ${s.stats.maxGapMs} ms`),
+            }, `Sending ${s.stats.fps}/s · write ${s.stats.writeMs} ms · gap ${s.stats.maxGapMs} ms`,
+              s.stats.writeErrors ? ` · ${s.stats.writeErrors} write error${s.stats.writeErrors > 1 ? "s" : ""}` : "",
+              s.stats.readErrors ? ` · ${s.stats.readErrors} read error${s.stats.readErrors > 1 ? "s" : ""}` : ""),
             h(Form.Check, {
               type: "switch", id: uid + "-out", label: "Send motion to device",
               checked: s.outputEnabled, onChange: (e) => engine.setOutputEnabled(e.target.checked),

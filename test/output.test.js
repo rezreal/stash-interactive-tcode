@@ -11,14 +11,25 @@ const vm = require("node:vm");
 const SRC = process.env.TCP_SRC || path.join(__dirname, "../plugin/TCodePlayer.js");
 
 class TimedPort {
-  constructor(writeMs) { this.writeMs = writeMs; this.cmds = []; this.readable = null; this._ws = null; }
+  /** failEvery: every n-th write fails with a system error, after which the browser offers a fresh stream */
+  constructor(writeMs, failEvery) {
+    this.writeMs = writeMs; this.failEvery = failEvery; this.n = 0; this.opened = 0;
+    this.cmds = []; this.readable = null; this._ws = null; this._broken = false;
+  }
   getInfo() { return { usbVendorId: 0x10c4, usbProductId: 0xea60 }; }
-  async open() { this.readable = new ReadableStream(); this._ws = this._stream(); }
+  async open() { this.opened++; this.readable = new ReadableStream(); this._ws = this._stream(); }
   async close() { this.readable = null; this._ws = null; }
-  get writable() { return this._ws; }
+  get writable() {
+    if (this._broken && this._ws) { this._ws = this._stream(); this._broken = false; }
+    return this._ws;
+  }
   _stream() {
     return new WritableStream({
       write: async (chunk) => {
+        if (this.failEvery && ++this.n % this.failEvery === 0) {
+          this._broken = true;
+          throw new DOMException("An unknown system error has occurred.", "UnknownError");
+        }
         const at = performance.now();
         const m = /L0(\d{4})(?:I(\d+))?/.exec(new TextDecoder().decode(chunk));
         if (m) this.cmds.push({ at, target: Number(m[1]) / 9999 * 100, I: Number(m[2] || 0) });
@@ -51,8 +62,8 @@ test.afterEach(async () => {
   }
 });
 
-async function play(writeMs, ms) {
-  const port = new TimedPort(writeMs);
+async function play(writeMs, ms, failEvery) {
+  const port = new TimedPort(writeMs, failEvery);
   const video = new PlayingVideo();
   const any = new Proxy({}, { get: () => ({}) });
   const window = {
@@ -118,3 +129,14 @@ for (const writeMs of [2, 25]) {
     if (engine.state.stats) assert.ok(engine.state.stats.fps > 0);
   });
 }
+
+test("a write failing every half second does not pause the output", async () => {
+  const { port } = await play(2, 1600, 30); // about every 0.5 s at 60 frames a second, as seen on an SR6
+  const from = port.cmds[0].at + 600, to = performance.now();
+  const late = port.cmds.filter((c) => c.at >= from);
+  const maxGap = Math.max(...late.slice(1).map((c, k) => c.at - late[k].at));
+  const { idle } = simulate(port.cmds, from, to);
+  assert.equal(port.opened, 1, "recovered on a fresh stream, no reopen");
+  assert.ok(maxGap < 100, `longest gap between commands ${maxGap.toFixed(0)} ms`);
+  assert.ok(idle <= 0.1, `device stands waiting ${(idle * 100).toFixed(0)} % of the time`);
+});
